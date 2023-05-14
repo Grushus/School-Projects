@@ -1,0 +1,352 @@
+# Automates ANN model building to other Python AI developers 
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import MinMaxScaler
+import tensorflow as tf
+import keras
+import random
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, mean_absolute_error, mean_squared_error
+from sklearn.utils.multiclass import type_of_target
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.models import load_model
+
+class MyAnn:
+
+    def __init__(self,data_set=str,target=str,hidden_layer_sizes=tuple,
+                 activation=str,loss=str,optimizer=str,batch_size=int,
+                 epochs=int,monitor=str,patience=int,mode=str,
+                 verbose=int,use_multiprocessing=bool,metrics=list):
+
+        self.data_set = data_set
+        self.target = target
+        self.hidden_layer_sizes = hidden_layer_sizes
+        self.activation = activation
+        self.loss = loss
+        self.optimizer = optimizer
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.monitor = monitor
+        self.patience = patience
+        self.mode = mode
+        self.verbose = verbose
+        self.use_multiprocessing = use_multiprocessing
+        self.metrics = metrics
+
+    def model_run(self):
+        df = pd.read_csv(self.data_set)
+        if df.isnull().sum().sum() > 0:
+            print("Data has missing values, clean your data before submitting")
+            exit()
+
+        type_check = type_of_target(df[self.target])
+        if type_check == "continuous" or type_check == "continuous-multioutput":
+            X = df.drop(self.target,axis=1).values
+            y = df[self.target].values
+        elif type_check != "continuous" or type_check != "continuous-multioutput":
+            if df[self.target].dtype == "object" or df[self.target].dtype == "bool":
+                print("Your data is categorical, creating dummies for target")
+                X = df.drop(self.target,axis=1).values
+                y = pd.get_dummies(df[self.target]).values
+            else:
+                X = df.drop(self.target,axis=1).values
+                y = df[self.target].values
+        
+        # Split data into training and testing
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=101)
+        
+        # Scaling
+        scaler = MinMaxScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+
+        # Model
+        model = Sequential()
+        
+        # Input layer
+        input_units_ask = input("How many units/neurons do you want the input layer to have?: ")
+        input_activation_ask = input("Which activation function do you want the input layer to have?\n"
+                               f"Your hidden layers activation function is: {self.activation}\n"
+                               "Your options are 'relu', 'sigmoid', 'softmax' 'tanh'\n"
+                                "Default is 'relu'. Enter here which one you'd like: ")
+        model.add(Dense(units=input_units_ask,activation=input_activation_ask))
+        
+        # Hidden layer(s)
+        for x in self.hidden_layer_sizes:
+            model.add(Dense(units=x,activation=self.activation))
+            x +=1
+            if x == len(self.hidden_layer_sizes):
+                break
+        
+        #Output Layer
+        output_units_ask = input("\nHow many units/neurons do you want the output layer to have?: ")
+        output_activation_ask = input("\nWhich activation function do you want the output layer to have?\n"
+                               f"Your hidden layers activation function is: {self.activation}\n"
+                               "Your options are: 'relu', 'sigmoid', 'softmax' 'tanh'\n"
+                                "Default is 'relu'. Enter here which one you'd like: ")
+        model.add(Dense(units=output_units_ask,activation=output_activation_ask))
+        
+        #Compile model
+        model.compile(optimizer=self.optimizer,loss=self.loss,metrics=self.metrics)
+
+        #Cloning model before fitting for the future option of having an early stop model
+        early_stop_model = keras.models.clone_model(model)
+        early_stop_model.compile(optimizer=self.optimizer,loss=self.loss,metrics=self.metrics)
+
+        #Training model
+        model.fit(x=X_train,
+                  y=y_train,
+                  validation_data=(X_test,y_test),
+                  batch_size=self.batch_size,
+                  epochs=self.epochs,
+                  verbose=self.verbose,
+                  use_multiprocessing=self.use_multiprocessing)
+        
+        #Early stop model
+        early_stop_ask = int(input("Model has been created. Would you also like to create a model based on early stopping?\n"
+                               "1 = Yes\n"
+                               "2 = No\n"
+                               ": "))
+        if early_stop_ask == 1:
+            #Configure early stopping
+            try:
+                early_stop = EarlyStopping(monitor = self.monitor,
+                                       mode=self.mode,
+                                       patience=self.patience)
+            except:
+                print("An error occured, try again without an early stop model")
+                exit()
+            early_stop_model.fit(x=X_train,
+                                 y=y_train,
+                                 validation_data=(X_test,y_test),
+                                 batch_size=self.batch_size,
+                                 epochs=self.epochs,
+                                 callbacks=[early_stop],
+                                 verbose=self.verbose,
+                                 use_multiprocessing=self.use_multiprocessing)
+        elif early_stop_ask == 2:
+            pass
+
+        return (early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler)
+        
+    def model_loss(self):
+        early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler = self.model_run()
+        if early_stop_ask == 1:
+            model_loss = pd.DataFrame(model.history.history)
+            early_stop_model_loss = pd.DataFrame(early_stop_model.history.history)
+            return (model_loss,early_stop_model_loss,early_stop_ask,df)
+        elif early_stop_ask == 2:
+            model_loss = pd.DataFrame(model.history.history)
+            return (model_loss,early_stop_model,early_stop_ask,df)
+
+    def plot_model_loss(self):
+        model_loss,early_stop_model_loss,early_stop_ask,df = self.model_loss()
+        if early_stop_ask == 1:
+            fig, ax = plt.subplots(2,1)
+            model_loss[["val_loss","loss"]].plot(ax=ax[0])
+            ax[0].set_title("Model Loss")
+            early_stop_model_loss[["val_loss","loss"]].plot(ax=ax[1])
+            ax[1].set_title("Early Stopping Model Loss")
+            plt.tight_layout()
+            plt.show()
+
+        elif early_stop_ask == 2:
+            model_loss[["val_loss","loss"]].plot()
+            plt.title("Model Loss")
+            plt.show()
+
+    def model_predict(self):
+        early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler = self.model_run()
+        df_rows = df.shape[0]
+        df_random_row = random.randrange(df_rows)
+        df_random_row_pred = df.drop(self.target,axis=1).iloc[df_random_row]
+        print(df_random_row_pred.shape)
+        resize_shape = (-1,df_random_row_pred.shape[0])
+        df_random_row_pred = scaler.transform(df_random_row_pred.values.reshape(resize_shape))
+        print(df_random_row_pred.shape)
+        model_prediction = model.predict(df_random_row_pred)
+        print(model_prediction.shape)
+        early_stop_model_prediction = early_stop_model.predict(df_random_row_pred)
+        return early_stop_ask,model,early_stop_model,model_prediction, early_stop_model_prediction
+    
+    def save_original_keras_model(self):
+        early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler = self.model_run()
+        if early_stop_ask == 1:
+            model_save = model.save(input("Enter what you'd like to save the model as: "))
+            early_stop_model_save = early_stop_model.save(input("Enter what you'd like to save your early stop model as: "))
+            return (early_stop_ask,model,early_stop_model_save,model_save)
+        elif early_stop_ask == 2:
+            model_save = model.save(input("Enter what you'd like to save the model as: "))
+            return (early_stop_ask,model,early_stop_model,model_save)
+    
+    def load_original_kears_model(self):
+        early_stop_ask,model,early_stop_model_save,model_save = self.save_original_keras_model()
+        if early_stop_ask == 1:
+            model_loaded = load_model(model_save)
+            early_stop_model_loaded = load_model(early_stop_model_save)
+        elif early_stop_ask == 2:
+            model_loaded = load_model(model_save)
+    
+    # Classification
+    def plot_model_accuracy(self):
+        model_loss,early_stop_model_loss,early_stop_ask,df = self.model_loss()
+        type_check = type_of_target(df[self.target])
+        if type_check == "continuous" or type_check == "continuous-multioutput":
+            print("This dataset is not applicable with this function, try regressor functions instead")
+        else:
+            if early_stop_ask == 1:
+                try:
+                    fig, ax = plt.subplots(2,1)
+                    model_loss[["accuracy","val_accuracy"]].plot(ax=ax[0])
+                    ax[0].set_title("Model Accuracy")
+                    early_stop_model_loss[["accuracy","val_accuracy"]].plot(ax=ax[1])
+                    ax[1].set_title("Early Stopping Model Accuracy")
+                    plt.tight_layout()
+                    plt.show()
+                except:
+                    print("Can't plot for 'accuracy' and 'val_accuracy', try assigning ['accuracy'] in class parameter 'metrics'. If you want to see model loss run model loss function")
+            elif early_stop_ask == 2:
+                try:
+                    model_loss[["accuracy","val_accuracy"]].plot()
+                    plt.title("Model Loss")
+                    plt.show()
+                except:
+                    print("Can't plot for 'accuracy' and 'val_accuracy', try assigning ['accuracy'] in class parameter 'metrics'. If you want to see model loss run model loss function")
+
+    def print_classification_report(self):
+        early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler = self.model_run()
+        type_check = type_of_target(df[self.target])
+        if type_check == "continuous" or type_check == "continuous-multioutput":
+            print("This dataset is not applicable with this function, try regressor functions instead")
+        else:
+            if early_stop_ask == 1:
+                model_prediction = np.argmax(model.predict(X_test),axis=1)
+                early_stop_model_prediction = np.argmax(model.predict(X_test),axis=1)
+                model_pred_dummies = pd.get_dummies (model_prediction)
+                early_stop_model_pred_dummies = pd.get_dummies(early_stop_model_prediction)
+                print("Model classification report")
+                print(classification_report(y_true=y_test,y_pred=model_pred_dummies))
+                print("Early stop model classification report")
+                print(classification_report(y_true=y_test,y_pred=early_stop_model_pred_dummies))
+            else:
+                model_prediction = np.argmax(model.predict(X_test),axis=1)
+                model_pred_dummies = pd.get_dummies (model_prediction)
+                print(classification_report(y_true=y_test,y_pred=model_pred_dummies))
+
+    #Regression
+    def plot_predictions_scatter(self):
+        early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler = self.model_run()
+        type_check = type_of_target(df[self.target])
+        if type_check != "continuous" or type_check != "continuous-multioutput":
+            print("This dataset is not applicable with this function, try classification functions instead")
+        else:
+            if early_stop_ask == 1:
+                fig, ax = plt.subplots(2,1)
+                model_pred = model.predict(X_test)
+                sns.scatterplot(y_test,model_pred,ax=ax[0])
+                ax[0].set_title("Model Scatter Plot")
+                early_stop_model_pred = early_stop_model.predict(X_test)
+                sns.scatterplot(y_test,early_stop_model_pred,ax=ax[0])
+                plt.plot(y_test,y_test,"r")
+                ax[1].set_title("Early Stop Model Scatter Plot")
+                plt.tight_layout()
+                plt.plot(y_test,y_test,"r")
+                plt.show()
+
+            elif early_stop_ask == 2:
+                model_pred = model.predict(X_test)
+                plt.scatter(y_test,model_pred)
+                plt.plot(y_test,y_test,"r")
+                plt.show()
+    
+    def rmse(self):
+        early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler = self.model_run()
+        type_check = type_of_target(df[self.target])
+        model_pred = model.predict(X_test)
+        early_stop_model_pred = early_stop_model.predict(X_test)
+        if type_check != "continuous" or type_check != "continuous-multioutput":
+            if early_stop_ask == 1:
+                model_RMSE = mean_squared_error(y_true=y_test,y_pred=model_pred)**0.5
+                print(f"RMSE for model is: {model_RMSE}")
+                early_stop_model_RMSE = mean_squared_error(y_true=y_test,y_pred=early_stop_model_pred)
+                print(f"RMSE for Early Stop Model is: {early_stop_model_RMSE}")
+            elif early_stop_ask == 2:
+                model_RMSE = mean_squared_error(y_true=y_test,y_pred=model_pred)**0.5
+                print(f"RMSE for model is: {model_RMSE}")
+        else:
+            print("This dataset is not applicable with this function, try classification functions instead")
+    
+    def mae(self):
+        early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler = self.model_run()
+        type_check = type_of_target(df[self.target])
+        model_pred = model.predict(X_test)
+        early_stop_model_pred = early_stop_model.predict(X_test)
+        if type_check != "continuous" or type_check != "continuous-multioutput":
+            if early_stop_ask == 1:
+                model_MAE = mean_absolute_error(y_true=y_test,y_pred=model_pred)
+                print(f"MAE for model is: {model_MAE}")
+                early_stop_model_MAE = mean_absolute_error(y_true=y_test,y_pred=early_stop_model_pred)
+                print(f"MAE for Early Stop Model is: {early_stop_model_MAE}")
+            elif early_stop_ask == 2:
+                model_MAE = mean_absolute_error(y_true=y_test,y_pred=model_pred)
+                print(f"MAE for model is: {model_MAE}")
+
+    def plot_residual_error(self):
+        early_stop_ask,model,early_stop_model,X_test,y_test,df,scaler = self.model_run()
+        type_check = type_of_target(df[self.target])
+        model_pred = model.predict(X_test)
+        early_stop_model_pred = early_stop_model.predict(X_test)
+        if type_check != "continuous" or type_check != "continuous-multioutput":
+            if early_stop_ask == 1:
+                fig, ax = plt.subplots(2,1)
+                sns.kdeplot(x=y_test,color="r",label="Actual value",ax=ax[0])
+                ax[0].legend(loc='upper right')
+                sns.kdeplot(model_pred,color="b",label="Fitted Value",ax=ax[0])
+                ax[0].legend(loc='upper right')
+                
+                sns.kdeplot(x=y_test,color="r",label="Actual value",ax=ax[1])
+                ax[1].legend(loc='upper right')
+                sns.kdeplot(early_stop_model_pred,color="b",label="Fitted Value",ax=ax[1])
+                ax[1].legend(loc='upper right')
+                plt.tight_layout()
+                plt.show()
+
+            elif early_stop_ask == 2:
+                fig, ax = plt.subplots()
+                sns.kdeplot(x=y_test,color="r",label="Actual value",ax=ax)
+                ax.legend(loc='upper right')
+                sns.kdeplot(model_pred,color="b",label="Fitted Value",ax=ax)
+                ax.legend(loc='upper right')
+                plt.show()
+    
+    # Saving class attributes
+    def class_attributes(self):
+        model_loss,early_stop_model,early_stop_ask,df = self.model_loss()
+        loss_ = model_loss["loss"].iloc[-1]
+        best_loss_ = model_loss["loss"].min()
+        return loss_,best_loss_
+
+''' Start by removing the two '#'s and running the python file '''
+
+# 03- ANN - Classification
+#MyAnn("C:\Python\deep learning\inlämningsuppgift\cancer_classification.csv","benign_0__mal_1",(15,),"relu",
+#"binary_crossentropy","adam",None,100,"val_loss",25,"min",1,None,None).print_classification_report()
+
+#01- ANN - Regression
+#MyAnn('deep learning\inlämningsuppgift\\fake_reg.csv',"price",(4,4,2),"relu",
+# "mse","rmsprop",None,100,None,None,None,1,None,None).class_attributes()
+
+#04- Ann - Classification with dummie creation
+#MyAnn("C:\Python\deep learning\inlämningsuppgift\iris.csv","species",(4,4),"relu",
+#"categorical_crossentropy","adam",None,600,None,None,None,1,None,["accuracy"]).print_classification_report()
+
+# Class attributes 
+''' I only got two done, and I'm not even confident they're class attributes '''
+
+#test = MyAnn('deep learning\inlämningsuppgift\\fake_reg.csv',"price",(4,4,2),"relu","mse","rmsprop",None,100,None,None,None,1,None,None)
+#loss_,best_loss,best_loss_ = test.class_attributes()

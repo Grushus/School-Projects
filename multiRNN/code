@@ -1,0 +1,361 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import seaborn as sns
+import tensorflow as tf
+from typing import Annotated
+from annotated_types import Gt,Lt
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense,LSTM
+from tensorflow.keras.callbacks import EarlyStopping
+
+class MultiRNN:
+    def __init__(self,
+                 csv:str,
+                 test_size:int,
+                 length:int,
+                 LSTM_units:int,
+                 activation=str,optimizer=str,
+                 batch_size=int,epochs=int,
+                 drop_columns=None,
+                 date_cutoff=None,
+                 save_losses=False,
+                 save_model=False):
+        
+        self.csv = csv
+        self.test_size = test_size
+        self.length = length
+        self.LSTM_units = LSTM_units
+        self.activation = activation
+        self.optimizer = optimizer
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.drop_columns = drop_columns
+        self.date_cutoff = date_cutoff
+        self.save_losses = save_losses
+        self.save_model = save_model
+
+        self.df = pd.read_csv(csv, parse_dates=True).rename(columns=str.lower).set_index('date')
+        self.df.index = pd.to_datetime(self.df.index)
+        if self.drop_columns is not None:
+            self.drop_columns = [x.lower() for x in self.drop_columns]
+            self.df = self.df.drop(self.drop_columns,axis=1)
+        if self.date_cutoff is not None:
+            self.df = self.df.loc[date_cutoff:]
+        if self.ready_for_processing:
+            pass
+        else:
+            raise ValueError("CSV is not cleaned")
+        if self.test_size == None:
+            raise ValueError("test_size can not be empty")
+        if self.length > 0 and isinstance(self.length,int):
+            pass
+        else:
+            raise ValueError("length must be positive integer")
+        if self.LSTM_units > 0 and isinstance(self.LSTM_units,int):
+            pass
+        else:
+            raise ValueError("LSTM_units must be positive integer")
+        if self.activation in ("tanh","relu","None"):
+            pass
+        else:
+            raise KeyError("activation must be 'tanh','relu' or 'None'")
+        if self.batch_size > 0 and isinstance(self.batch_size,int):
+            pass
+        else:
+            raise ValueError("batch_size must be positive integer")
+        if self.epochs > 0 and isinstance(self.epochs,int):
+            pass
+        else:
+            raise ValueError("epochs must be positive integer")
+        
+        self.train = self.df[:-self.test_size]
+        self.test = self.df[-self.test_size:]
+        self.train_list = self.generate_dataset_per_column_with_original_index(self.train,save=True)
+        self.test_list = self.generate_dataset_per_column_with_original_index(self.test,save=False)
+        self.scaler_list = []
+        self.model_list = []
+        self.model_dict = {}
+        self.forecast_epochs = {}
+        self.freq = pd.infer_freq(self.df.index)
+
+        self.build_model_per_column()
+
+
+    def ready_for_processing(self): 
+        
+        clean = True
+        if self.df.isnull().sum().sum() > 0: # Check for missing values
+            clean = False
+        for column in self.df.columns:
+            if self.df[column].dtype.kind not in "iuf": # Check for object dtype
+                print(f"You have object type in {column}, needs to be numeric. Fix manually and comeback")
+                clean = False
+        return clean
+
+    def generate_dataset_per_column_with_original_index(self,data,save:bool):
+        if data is None:
+            data = self.df
+            df_list = []
+            for column in data.columns:
+                df_holder = pd.DataFrame(data=data[column],index=data.index)
+                df_list.append(df_holder)
+                if save == True:
+                    df_holder.to_csv(column+"_RNN_column.csv")
+                    print(f"Dataframe for column {column} created successfully")
+            self.list_of_data_frames = df_list
+            return df_list
+        
+        if data is not None:
+            df_list = []
+            for column in data:
+                df_holder = pd.DataFrame(data=data[column],index=data.index)
+                df_list.append(df_holder)
+                if save == True:
+                    df_holder.to_csv(column+"_RNN_column.csv")
+                    print(f"Dataframe for column {column} created successfully")
+            self.list_of_data_frames = df_list
+            return df_list
+
+    def build_model_per_column(self):
+
+        i = 0
+        for column in self.train.columns: # Iterates through all columns and builds model for columns
+            print(f"Creating model for column: {column}")
+            scaler = MinMaxScaler()
+            scaled_train = scaler.fit_transform(self.train_list[i])
+            scaled_test = scaler.transform(self.test_list[i])
+            self.scaler_list.append(scaler)
+            train_generator = TimeseriesGenerator(scaled_train,scaled_train,length=self.length,batch_size=self.batch_size)
+            test_generator = TimeseriesGenerator(scaled_test,scaled_test,length=self.length,batch_size=self.batch_size)
+            n_features = scaled_train.shape[-1]
+
+            # Model build begins
+            model = Sequential()
+            model.add(LSTM(units=self.LSTM_units,activation=self.activation,input_shape = (self.length,n_features))) # Input layer
+            model.add(Dense(n_features)) # Output layer
+            model.compile(optimizer=self.optimizer,loss="mse") # Model compile
+
+            #Early stop
+            early_stop = EarlyStopping(monitor = "val_loss",patience=2)
+
+            # Model starts training
+            results = model.fit(train_generator,
+                        epochs=self.epochs,
+                        validation_data = test_generator,
+                        callbacks = [early_stop])
+            
+            # Save losses and model to our working folder. Defined in class arguments
+            losses = pd.DataFrame(results.history)
+            model_name = column+"_RNN_column.h5"
+            if self.save_losses == True:
+                losses.to_csv(column+"_loss_data",index=False)
+            if self.save_model == True:
+                model.save(model_name)
+
+            test_predictions = [] # Collect predictions
+            eval_first_batch = scaled_train[-self.length:] 
+            current_batch = eval_first_batch.reshape((1,self.length,n_features)) 
+            for _ in range(len(self.test)): # Loop
+                current_pred = model.predict(current_batch)[0]
+                test_predictions.append(current_pred)  # Appends prediction to list
+                current_batch = np.append(current_batch[:,1:,:],[[current_pred]],axis=1)
+            pred = scaler.inverse_transform(test_predictions)
+            pred_df = pd.DataFrame(data=pred,index=self.test.index, columns = [self.train.columns.values[i]]) # Creates df from predictions
+            pred_df_name = column+"_RNN_column_pred.csv"
+            pred_df.to_csv(pred_df_name)
+
+            epochs_forecast = 1
+            for x in results.history["loss"]:
+                epochs_forecast += 1
+            
+            self.forecast_epochs[column] = epochs_forecast
+            self.model_dict[column] = {'model': model, "model_name": model_name, 'losses': losses}
+            self.model_list.append(model)
+            i += 1
+
+
+            
+    def predict(self):
+        
+        prediction_list = []
+        prediction = []
+        prediction_print = []
+        column_print = []
+        predict_features = len(self.test.columns)     
+
+        for column_x in range(predict_features):
+            column = [self.test.columns[column_x]]
+            scaled_input = self.scaler_list[column_x].transform(self.test_list[column_x][:-self.length])
+            input_batch = scaled_input.reshape(1,self.length,1)
+            prediction = self.model_list[column_x].predict(input_batch)[0]
+            prediction_f = self.scaler_list[column_x].inverse_transform(prediction.reshape(-1,1))
+            prediction_f = prediction_f[0][0]
+            prediction_print.append(prediction_f)
+            column_print.append(column)
+            prediction_list.append(prediction_f)
+        
+        print("─"*52)
+        for x in range(len(prediction_print)):
+            print(f"Prediction for column {column_print[x]} is [{prediction_print[x]}]")
+        
+
+            
+        pred_df = pd.DataFrame(data = np.array(prediction_list).reshape(-1,len(prediction_list)),columns=self.test.columns)
+        return pred_df
+    
+    def plot_predict_against_test_dataset_per_column(self,
+                                                     figure_width:int,
+                                                     figure_height:int,
+                                                     save_plot_name:str,
+                                                     automatic:bool=True,
+                                                     column:str=None):
+        if column is not None:
+            str.lower(column)
+
+        if automatic == True:
+            for column_x in range (len(self.test.columns)):
+                column = self.test.columns[column_x]
+                pred_df_name = column+"_RNN_column_pred.csv"
+                pred_df = pd.read_csv(pred_df_name,parse_dates=True,index_col="date")
+                pred_df.insert(1,column="Original value",value=self.test[column])
+                print(pred_df)
+                if save_plot_name is not None:
+                    plt.figure()
+                    fig, ax = plt.subplots(figsize=(figure_width,figure_height),nrows=1,ncols=1)
+                    ax.set_title(f'Plot of original value and predicted value | {column}')
+                    ax.set(ylabel="value")
+                    pred_df.plot(ax=ax)
+                    fig.savefig(column+save_plot_name)
+                    plt.close(fig)
+        else:
+            if column in self.test.columns:
+                pred_df_name = column+"_RNN_column_pred.csv"
+                pred_df = pd.read_csv(pred_df_name,parse_dates=True,index_col="date")
+                pred_df.insert(1,column="Original value",value=self.test[column])
+                print(pred_df)
+                if save_plot_name is not None:
+                    plt.figure()
+                    fig, ax = plt.subplots(figsize=(figure_width,figure_height),nrows=1,ncols=1)
+                    ax.set_title(f'Plot of original value and predicted value | {column}')
+                    ax.set(ylabel="value")
+                    pred_df.plot(ax=ax)
+                    fig.savefig(column+save_plot_name)
+                    plt.close(fig)
+            
+    def plot_loss_val_loss_per_column(self,
+                                      figure_width:int,
+                                      figure_height:int,
+                                      save_plot_name:str,
+                                      automatic:bool=True,
+                                      column:str=None):
+        if column is not None:
+            str.lower(column)
+
+        if automatic == True:
+            for column_x in range (len(self.test.columns)):
+                column = self.test.columns[column_x]
+                losses = self.model_dict[column]["losses"]
+                print(f"{losses}")
+                if save_plot_name is not None:
+                    plt.figure()
+                    fig, ax = plt.subplots(figsize=(figure_width,figure_height))
+                    ax.set_title('Training and Validation Loss')
+                    losses.plot(ax=ax)
+                    fig.savefig(column+save_plot_name)
+                    plt.close(fig)
+        
+        else:
+            if column in self.test.columns:
+                losses = self.model_dict[column]["losses"]
+                print(f"{losses}")
+                if save_plot_name is not None:
+                    plt.figure()
+                    fig, ax = plt.subplots(figsize=(figure_width,figure_height))
+                    ax.set_title('Training and Validation Loss')
+                    losses.plot(ax=ax)
+                    fig.savefig(column+save_plot_name)
+                    plt.close(fig)
+
+    def forecast_per_column(self,forecast_period:int):
+        
+
+        i = 0
+        for column in self.train.columns: # Iterates through all columns and builds model for columns
+            print(f"Creating model for column: {column}")
+            forecast_scaler = MinMaxScaler()
+            scaled_column = forecast_scaler.fit_transform(self.train_list[i])
+            #self.scaler_list.append(scaler)
+            forecast_generator = TimeseriesGenerator(scaled_column,scaled_column,length=self.length,batch_size=self.batch_size)
+            n_features = scaled_column.shape[-1]
+
+            # Model build begins
+            forecast_model = Sequential()
+            forecast_model.add(LSTM(units=self.LSTM_units,activation=self.activation,input_shape = (self.length,n_features))) # Input layer
+            forecast_model.add(Dense(n_features)) # Output layer
+            forecast_model.compile(optimizer=self.optimizer,loss="mse") # Model compile
+
+
+            # Model starts training
+            forecast_model.fit(forecast_generator,epochs=self.forecast_epochs[column])
+            
+
+            forecast = [] # Collect predictions
+            forecast_start_date = pd.date_range(start=self.test.index[-1],periods=2,freq=self.freq)
+            forecast_start_date = forecast_start_date[1]
+
+            eval_first_batch = scaled_column[-self.length:] 
+            current_batch = eval_first_batch.reshape((1,self.length,n_features)) # Reshape to input shape of model
+            for _ in range(forecast_period): 
+                current_pred = forecast_model.predict(current_batch)[0]
+                forecast.append(current_pred) 
+                current_batch = np.append(current_batch[:,1:,:],[[current_pred]],axis=1)
+            forecast_values = forecast_scaler.inverse_transform(forecast)
+            forecast_index = pd.date_range(start=forecast_start_date,periods=forecast_period,freq=self.freq)
+            forecast_df = pd.DataFrame(data=forecast_values,index=forecast_index, columns = ["forecast_"+self.train.columns.values[i]])
+            forecast_df.index.name = "date"
+            forecast_df_name = column+"_RNN_column_forecast_pred.csv"
+            forecast_df.to_csv(forecast_df_name)
+            i += 1
+
+    def plot_forecast_per_column_against_dataset(self,
+                                                figure_width:int,
+                                                figure_height:int,
+                                                save_plot_name:str,
+                                                automatic:bool=True,
+                                                column:str=None):
+        if column is not None:
+            str.lower(column)
+
+        if automatic==True:
+            for column_x in range (len(self.test.columns)):
+                column = self.test.columns[column_x]
+                forecast_df_name = column+"_RNN_column_forecast_pred.csv"
+                forecast_df = pd.read_csv(forecast_df_name,parse_dates=True,index_col="date")
+                print(forecast_df)
+                if save_plot_name is not None:          
+                    plt.figure()
+                    fig, ax = plt.subplots(figsize=(figure_width,figure_height),nrows=1,ncols=1)
+                    ax.set_title(f'Plot of {column} and forecasted values for the column')
+                    ax.set(ylabel="value")
+                    ax = self.df[column].plot()
+                    forecast_df.plot(ax=ax)
+                    fig.savefig(column+save_plot_name)
+                    plt.close(fig)
+        else:
+            if column in self.df.columns:
+                forecast_df_name = column+"_RNN_column_forecast_pred.csv"
+                forecast_df = pd.read_csv(forecast_df_name,parse_dates=True,index_col="date")
+                print(forecast_df)
+                if save_plot_name is not None:          
+                    plt.figure()
+                    fig, ax = plt.subplots(figsize=(figure_width,figure_height),nrows=1,ncols=1)
+                    ax.set_title(f'Plot of {column} and forecasted values for the column')
+                    ax.set(ylabel="value")
+                    ax = self.df[column].plot()
+                    forecast_df.plot(ax=ax)
+                    fig.savefig(column+save_plot_name)
+                    plt.close(fig)

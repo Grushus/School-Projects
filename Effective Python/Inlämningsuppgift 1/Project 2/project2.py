@@ -147,4 +147,3 @@ class lucky_number():
 
 game = lucky_number()
 game
-        
